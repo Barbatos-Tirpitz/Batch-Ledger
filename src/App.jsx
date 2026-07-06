@@ -1,7 +1,8 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import Papa from "papaparse";
+import * as XLSX from "xlsx";
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from "recharts";
-import { Plus, Trash2, Upload, Download, FlaskConical, Package, ClipboardList, LayoutDashboard, ChevronDown, ChevronRight } from "lucide-react";
+import { Plus, Trash2, Upload, Download, FlaskConical, Package, ClipboardList, LayoutDashboard, ChevronDown, ChevronRight, FileSpreadsheet } from "lucide-react";
 
 const C = {
   paper: "#FAF7F0",
@@ -102,6 +103,34 @@ function FileImportBtn({ onData, label = "Import CSV" }) {
   );
 }
 
+function WorkbookImportButton({ onFile }) {
+  const ref = useRef(null);
+  return (
+    <>
+      <input
+        type="file"
+        accept=".xlsx,.xls"
+        ref={ref}
+        className="hidden"
+        onChange={(e) => {
+          const file = e.target.files[0];
+          if (!file) return;
+          onFile(file);
+          e.target.value = "";
+        }}
+      />
+      <button
+        onClick={() => ref.current.click()}
+        className="flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium"
+        style={{ background: C.accent, color: C.paper, fontFamily: "'Inter', sans-serif" }}
+      >
+        <FileSpreadsheet size={14} />
+        Import Excel workbook
+      </button>
+    </>
+  );
+}
+
 // ---------- main app ----------
 export default function BatchLedger() {
   const [data, setData] = useState({ ingredients: [], products: [], logs: [] });
@@ -187,68 +216,134 @@ export default function BatchLedger() {
   const addLog = (log) => persist({ ...data, logs: [...data.logs, log] });
   const deleteLog = (id) => persist({ ...data, logs: data.logs.filter((l) => l.id !== id) });
 
-  // ---- CSV import handlers ----
-  const importIngredients = (rows) => {
-    let added = 0;
-    let next = { ...data, ingredients: [...data.ingredients] };
+  // ---- pure merge functions: (data, rows) -> next data. No state/persist side effects,
+  // so these can be chained (ingredients -> products -> logs) before a single persist() call.
+  const applyIngredientRows = (base, rows) => {
+    let ingredients = [...base.ingredients];
     rows.forEach((r) => {
       const name = (r.name || "").trim();
       if (!name) return;
-      const idx = next.ingredients.findIndex((i) => i.name.toLowerCase() === name.toLowerCase());
-      const entry = { name, unit: (r.unit || "unit").trim(), cost: r.cost ? parseFloat(r.cost) : undefined };
-      if (idx >= 0) next.ingredients[idx] = { ...next.ingredients[idx], ...entry };
-      else {
-        next.ingredients.push({ id: uid("ing"), ...entry });
-        added++;
-      }
+      const idx = ingredients.findIndex((i) => i.name.toLowerCase() === name.toLowerCase());
+      const entry = { name, unit: (r.unit || "unit").toString().trim(), cost: r.cost !== undefined && r.cost !== "" ? parseFloat(r.cost) : undefined };
+      if (idx >= 0) ingredients[idx] = { ...ingredients[idx], ...entry };
+      else ingredients.push({ id: uid("ing"), ...entry });
     });
-    persist(next);
-    flash(`Imported ${rows.length} rows (${added} new ingredients).`);
+    return { ...base, ingredients };
   };
 
-  const importProducts = (rows) => {
-    let next = { ...data, ingredients: [...data.ingredients], products: [...data.products] };
-    let skipped = 0;
+  const applyProductRows = (base, rows) => {
+    let ingredients = [...base.ingredients];
+    let products = [...base.products];
     rows.forEach((r) => {
       const pname = (r.product || "").trim();
       const iname = (r.ingredient || "").trim();
       const qty = parseFloat(r.qty_per_unit);
-      if (!pname || !iname || isNaN(qty)) {
-        skipped++;
-        return;
-      }
-      let ing = next.ingredients.find((i) => i.name.toLowerCase() === iname.toLowerCase());
+      if (!pname || !iname || isNaN(qty)) return;
+      let ing = ingredients.find((i) => i.name.toLowerCase() === iname.toLowerCase());
       if (!ing) {
         ing = { id: uid("ing"), name: iname, unit: "unit" };
-        next.ingredients.push(ing);
+        ingredients.push(ing);
       }
-      let prod = next.products.find((p) => p.name.toLowerCase() === pname.toLowerCase());
+      let prod = products.find((p) => p.name.toLowerCase() === pname.toLowerCase());
       if (!prod) {
         prod = { id: uid("prod"), name: pname, recipe: [] };
-        next.products.push(prod);
+        products.push(prod);
       }
       prod.recipe = [...prod.recipe.filter((l) => l.ingredientId !== ing.id), { ingredientId: ing.id, qty }];
     });
-    persist(next);
-    flash(`Imported recipe rows.${skipped ? ` Skipped ${skipped} incomplete rows.` : ""}`);
+    return { ...base, ingredients, products };
   };
 
-  const importLogs = (rows) => {
-    let next = { ...data, logs: [...data.logs] };
-    let skipped = 0;
+  const applyLogRows = (base, rows) => {
+    let logs = [...base.logs];
     rows.forEach((r) => {
       const pname = (r.product || "").trim();
       const qty = parseFloat(r.qty_produced);
       const date = (r.date || "").trim();
-      const prod = data.products.find((p) => p.name.toLowerCase() === pname.toLowerCase());
-      if (!prod || isNaN(qty) || !date) {
-        skipped++;
+      const prod = base.products.find((p) => p.name.toLowerCase() === pname.toLowerCase());
+      if (!prod || isNaN(qty) || !date) return;
+      logs.push({ id: uid("log"), date, productId: prod.id, qty });
+    });
+    return { ...base, logs };
+  };
+
+  // ---- CSV import handlers (single sheet at a time, from each tab's Import CSV button) ----
+  const importIngredients = (rows) => {
+    const before = data.ingredients.length;
+    const next = applyIngredientRows(data, rows);
+    persist(next);
+    flash(`Imported ${rows.length} rows (${next.ingredients.length - before} new ingredients).`);
+  };
+
+  const importProducts = (rows) => {
+    const next = applyProductRows(data, rows);
+    persist(next);
+    flash(`Imported recipe rows.`);
+  };
+
+  const importLogs = (rows) => {
+    const before = data.logs.length;
+    const next = applyLogRows(data, rows);
+    const added = next.logs.length - before;
+    persist(next);
+    flash(`Imported ${added} production entries.${added < rows.length ? ` Skipped ${rows.length - added} (unknown product or bad data).` : ""}`);
+  };
+
+  // ---- Excel workbook import: reads Ingredients/Products/Production Log sheets from one .xlsx ----
+  const readWorkbookFile = (file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        try {
+          resolve(XLSX.read(e.target.result, { type: "array" }));
+        } catch (err) {
+          reject(err);
+        }
+      };
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    });
+
+  const sheetRows = (wb, name) => {
+    const sheet = wb.Sheets[name];
+    if (!sheet) return null;
+    const rows = XLSX.utils.sheet_to_json(sheet, { raw: false, defval: "" });
+    return rows
+      .filter((r) => !Object.values(r).some((v) => typeof v === "string" && v.trim().startsWith("↑")))
+      .filter((r) => Object.values(r).some((v) => String(v).trim() !== ""));
+  };
+
+  const importWorkbook = async (file) => {
+    try {
+      const wb = await readWorkbookFile(file);
+      let next = data;
+      const summary = [];
+
+      const ingRows = sheetRows(wb, "Ingredients");
+      if (ingRows && ingRows.length) {
+        next = applyIngredientRows(next, ingRows);
+        summary.push(`${ingRows.length} ingredient row${ingRows.length !== 1 ? "s" : ""}`);
+      }
+      const prodRows = sheetRows(wb, "Products");
+      if (prodRows && prodRows.length) {
+        next = applyProductRows(next, prodRows);
+        summary.push(`${prodRows.length} recipe row${prodRows.length !== 1 ? "s" : ""}`);
+      }
+      const logRows = sheetRows(wb, "Production Log");
+      if (logRows && logRows.length) {
+        next = applyLogRows(next, logRows);
+        summary.push(`${logRows.length} production row${logRows.length !== 1 ? "s" : ""}`);
+      }
+
+      if (summary.length === 0) {
+        flash("No matching sheets found — expected tabs named Ingredients, Products, and/or Production Log.", "warn");
         return;
       }
-      next.logs.push({ id: uid("log"), date, productId: prod.id, qty });
-    });
-    persist(next);
-    flash(`Imported ${rows.length - skipped} production entries.${skipped ? ` Skipped ${skipped} (unknown product or bad data).` : ""}`);
+      persist(next);
+      flash(`Imported from workbook: ${summary.join(", ")}.`);
+    } catch (e) {
+      flash("Could not read that file — make sure it's a valid .xlsx workbook.", "warn");
+    }
   };
 
   // ---- derived dashboard data ----
@@ -309,8 +404,11 @@ export default function BatchLedger() {
               Batch Ledger
             </h1>
           </div>
-          <div className="text-xs text-right" style={{ color: C.inkSoft, fontFamily: "'JetBrains Mono', monospace" }}>
-            {data.ingredients.length} ingredients · {data.products.length} products · {data.logs.length} entries
+          <div className="flex flex-col items-end gap-2">
+            <WorkbookImportButton onFile={importWorkbook} />
+            <div className="text-xs text-right" style={{ color: C.inkSoft, fontFamily: "'JetBrains Mono', monospace" }}>
+              {data.ingredients.length} ingredients · {data.products.length} products · {data.logs.length} entries
+            </div>
           </div>
         </div>
 
