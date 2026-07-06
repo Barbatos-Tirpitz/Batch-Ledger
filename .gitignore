@@ -3,3 +3,8 @@ dist
 .DS_Store
 *.local
 .env
+
+# working data files go here, but shouldn't be committed
+import/*
+!import/README.md
+!import/.gitkeep
