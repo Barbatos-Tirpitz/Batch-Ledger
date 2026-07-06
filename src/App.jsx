@@ -137,9 +137,11 @@ export default function BatchLedger() {
   const addIngredient = (ing) => {
     if (data.ingredients.some((i) => i.name.toLowerCase() === ing.name.toLowerCase())) {
       flash("An ingredient with that name already exists.", "warn");
-      return;
+      return null;
     }
-    persist({ ...data, ingredients: [...data.ingredients, { id: uid("ing"), ...ing }] });
+    const newIng = { id: uid("ing"), ...ing };
+    persist({ ...data, ingredients: [...data.ingredients, newIng] });
+    return newIng;
   };
   const deleteIngredient = (id) => {
     persist({
@@ -348,6 +350,7 @@ export default function BatchLedger() {
               onAddLine={addRecipeLine}
               onRemoveLine={removeRecipeLine}
               onImport={importProducts}
+              onAddIngredient={addIngredient}
             />
           )}
           {tab === "logs" && <LogsTab data={data} onAdd={addLog} onDelete={deleteLog} onImport={importLogs} />}
@@ -419,13 +422,15 @@ function IngredientsTab({ data, onAdd, onDelete, onImport }) {
 }
 
 // ---------- Products ----------
-function ProductsTab({ data, onAdd, onDelete, onAddLine, onRemoveLine, onImport }) {
+function ProductsTab({ data, onAdd, onDelete, onAddLine, onRemoveLine, onImport, onAddIngredient }) {
   const [name, setName] = useState("");
   const [expanded, setExpanded] = useState({});
 
   const submit = () => {
     if (!name.trim()) return;
-    onAdd({ id: uid("prod"), name: name.trim(), recipe: [] });
+    const newProduct = { id: uid("prod"), name: name.trim(), recipe: [] };
+    onAdd(newProduct);
+    setExpanded((e) => ({ ...e, [newProduct.id]: true }));
     setName("");
   };
 
@@ -452,7 +457,7 @@ function ProductsTab({ data, onAdd, onDelete, onAddLine, onRemoveLine, onImport 
         </div>
       </div>
       <p className="text-xs mb-3" style={{ color: C.inkSoft }}>
-        CSV format for recipes: <code>product, ingredient, qty_per_unit</code> — one row per ingredient used in a product.
+        CSV format for recipes: <code>product, ingredient, qty_per_unit</code> — one row per ingredient used in a product. Or just add a product below and build its recipe by hand, creating new ingredients on the spot as you go.
       </p>
 
       <div className="flex gap-2 mb-4 items-end">
@@ -481,7 +486,7 @@ function ProductsTab({ data, onAdd, onDelete, onAddLine, onRemoveLine, onImport 
             </div>
             {expanded[p.id] && (
               <div className="px-3 pb-3">
-                <RecipeEditor product={p} ingredients={data.ingredients} onAddLine={onAddLine} onRemoveLine={onRemoveLine} />
+                <RecipeEditor product={p} ingredients={data.ingredients} onAddLine={onAddLine} onRemoveLine={onRemoveLine} onAddIngredient={onAddIngredient} />
               </div>
             )}
           </div>
@@ -491,9 +496,33 @@ function ProductsTab({ data, onAdd, onDelete, onAddLine, onRemoveLine, onImport 
   );
 }
 
-function RecipeEditor({ product, ingredients, onAddLine, onRemoveLine }) {
+function RecipeEditor({ product, ingredients, onAddLine, onRemoveLine, onAddIngredient }) {
   const [ingId, setIngId] = useState("");
   const [qty, setQty] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [newName, setNewName] = useState("");
+  const [newUnit, setNewUnit] = useState("kg");
+  const [newCost, setNewCost] = useState("");
+
+  const handleSelectChange = (e) => {
+    if (e.target.value === "__new__") {
+      setCreating(true);
+      setIngId("");
+    } else {
+      setIngId(e.target.value);
+    }
+  };
+
+  const createIngredient = () => {
+    if (!newName.trim()) return;
+    const created = onAddIngredient({ name: newName.trim(), unit: newUnit, cost: newCost ? parseFloat(newCost) : undefined });
+    if (created) {
+      setIngId(created.id);
+      setCreating(false);
+      setNewName("");
+      setNewCost("");
+    }
+  };
 
   return (
     <div>
@@ -503,33 +532,60 @@ function RecipeEditor({ product, ingredients, onAddLine, onRemoveLine }) {
           const ing = ingredients.find((i) => i.id === r.ingredientId);
           return [ing?.name || "?", `${fmt(r.qty)} ${ing?.unit || ""}`, <DeleteBtn key="x" onClick={() => onRemoveLine(product.id, r.ingredientId)} />];
         })}
-        empty="No recipe lines yet."
+        empty="No recipe lines yet — pick an ingredient below, or create a new one on the spot."
         dense
       />
-      <div className="flex gap-2 mt-2 items-end">
-        <Field label="Ingredient">
-          <select value={ingId} onChange={(e) => setIngId(e.target.value)} style={inputStyle}>
-            <option value="">Select…</option>
-            {ingredients.map((i) => (
-              <option key={i.id} value={i.id}>{i.name}</option>
-            ))}
-          </select>
-        </Field>
-        <Field label="Qty per unit">
-          <input value={qty} onChange={(e) => setQty(e.target.value)} placeholder="0.0" style={{ ...inputStyle, width: 90 }} />
-        </Field>
-        <button
-          onClick={() => {
-            if (!ingId || !qty) return;
-            onAddLine(product.id, { ingredientId: ingId, qty: parseFloat(qty) });
-            setQty("");
-          }}
-          className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium mb-0.5"
-          style={{ background: C.accentSoft, color: C.accent }}
+
+      {creating ? (
+        <div className="flex gap-2 mt-2 items-end flex-wrap p-2 rounded" style={{ background: C.accentSoft }}>
+          <Field label="New ingredient name">
+            <input value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="e.g. Vanilla extract" style={{ ...inputStyle, width: 180 }} autoFocus />
+          </Field>
+          <Field label="Unit">
+            <select value={newUnit} onChange={(e) => setNewUnit(e.target.value)} style={inputStyle}>
+              {["g", "kg", "ml", "L", "pcs"].map((u) => (
+                <option key={u} value={u}>{u}</option>
+              ))}
+            </select>
+          </Field>
+          <Field label="Cost/unit (optional)">
+            <input value={newCost} onChange={(e) => setNewCost(e.target.value)} placeholder="0.00" style={{ ...inputStyle, width: 90 }} />
+          </Field>
+          <button onClick={createIngredient} className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium mb-0.5" style={{ background: C.accent, color: C.paper }}>
+            <Plus size={13} /> Create & use
+          </button>
+          <button onClick={() => setCreating(false)} className="text-xs mb-0.5 px-2" style={{ color: C.inkSoft }}>
+            Cancel
+          </button>
+        </div>
+      ) : (
+        <div className="flex gap-2 mt-2 items-end">
+          <Field label="Ingredient">
+            <select value={ingId} onChange={handleSelectChange} style={{ ...inputStyle, width: 180 }}>
+              <option value="">Select…</option>
+              {ingredients.map((i) => (
+                <option key={i.id} value={i.id}>{i.name}</option>
+              ))}
+              <option value="__new__">+ New ingredient…</option>
+            </select>
+          </Field>
+          <Field label="Qty per unit">
+            <input value={qty} onChange={(e) => setQty(e.target.value)} placeholder="0.0" style={{ ...inputStyle, width: 90 }} />
+          </Field>
+          <button
+            onClick={() => {
+              if (!ingId || !qty) return;
+              onAddLine(product.id, { ingredientId: ingId, qty: parseFloat(qty) });
+              setQty("");
+              setIngId("");
+            }}
+            className="flex items-center gap-1 px-2.5 py-1.5 rounded text-xs font-medium mb-0.5"
+            style={{ background: C.accentSoft, color: C.accent }}
         >
           <Plus size={13} /> Add line
         </button>
-      </div>
+        </div>
+      )}
     </div>
   );
 }
